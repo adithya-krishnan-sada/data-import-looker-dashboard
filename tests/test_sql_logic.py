@@ -53,7 +53,8 @@ class TestSQLLogicLocal(unittest.TestCase):
                     source_identifier VARCHAR,
                     source_type VARCHAR,
                     migration_error_code VARCHAR,
-                    migration_error_title VARCHAR
+                    migration_error_title VARCHAR,
+                    source_uri VARCHAR
                 ),
                 _PARTITIONTIME TIMESTAMP
             );
@@ -69,7 +70,8 @@ class TestSQLLogicLocal(unittest.TestCase):
             sql_content = f.read()
 
         # Clean project/dataset prefixes so they execute in the local namespace
-        sql_content = sql_content.replace("{project}.{dataset}.", "")
+        sql_content = sql_content.replace("{project}.{source_dataset}.", "")
+        sql_content = sql_content.replace("{project}.{target_dataset}.", "")
         if replacements:
             for k, v in replacements.items():
                 sql_content = sql_content.replace(k, v)
@@ -82,10 +84,16 @@ class TestSQLLogicLocal(unittest.TestCase):
             
             # AST Optimization: strip qualifiers from LHS of Update SET clauses
             for update_node in statement.find_all(sqlglot.exp.Update):
-                for eq_node in update_node.find_all(sqlglot.exp.EQ):
+                for eq_node in update_node.expressions:
                     lhs = eq_node.left
                     if isinstance(lhs, sqlglot.exp.Column):
                         lhs.set('table', None)
+
+            # DuckDB has no LIMIT inside ARRAY_AGG. Every use in the DML is followed by [OFFSET(0)],
+            # so dropping the LIMIT returns the same element.
+            for limit_node in list(statement.find_all(sqlglot.exp.Limit)):
+                if limit_node.find_ancestor(sqlglot.exp.ArrayAgg):
+                    limit_node.replace(limit_node.this)
 
             duck_sql = statement.sql(dialect="duckdb")
             self.conn.execute(duck_sql)
@@ -147,16 +155,20 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 4. Assertions on mapped/deduplicated session registry
         map_wave_rows = self.conn.execute("SELECT * FROM map_wave_details").fetchall()
         self.assertEqual(len(map_wave_rows), 1)
-        self.assertEqual(map_wave_rows[0][0], "Exchange Online Migration")
+        self.assertEqual(map_wave_rows[0][0], "Exchange Online")
         self.assertEqual(map_wave_rows[0][1], "101")
         self.assertEqual(map_wave_rows[0][2], "Wave-X Batch")
 
         # 5. Assertions on fact table metrics
-        wave_metrics = self.conn.execute("SELECT * FROM fact_wave_metrics").fetchall()
+        wave_metrics = self.conn.execute("""
+            SELECT user_count, completed_user_count, successfully_migrated_items, total_migrated_items,
+                   migrated_mails_count, migrated_calendars_count, migrated_contacts_count,
+                   success_percentage, completion_percentage, status, outcome
+            FROM fact_wave_metrics
+        """).fetchall()
         self.assertEqual(len(wave_metrics), 1)
-        
-        # Unpack result row (matches fact_wave_metrics schema)
-        data_type, batch_id, batch_name, filter_lbl, start_date, user_cnt, comp_user, succ_items, tot_items, email_cnt, cal_cnt, con_cnt, succ_pct, comp_pct, avg_items, status = wave_metrics[0]
+
+        user_cnt, comp_user, succ_items, tot_items, email_cnt, cal_cnt, con_cnt, succ_pct, comp_pct, status, outcome = wave_metrics[0]
         
         self.assertEqual(user_cnt, 1)
         self.assertEqual(comp_user, 1)
@@ -168,12 +180,11 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(succ_pct, 0.75) # 3 / 4
         self.assertEqual(comp_pct, 1.0) # 1 / 1 user completed
         self.assertEqual(status, "Completed")
+        self.assertEqual(outcome, "With failures") # 1 failed item
 
         # 6. Assertions on fact user metrics
-        user_metrics = self.conn.execute("SELECT * FROM fact_user_wave_metrics").fetchall()
-        self.assertEqual(len(user_metrics), 1)
-        self.assertEqual(user_metrics[0][4], "user1@example.com") # user_identifier
-        self.assertEqual(user_metrics[0][13], "Completed") # status
+        user_metrics = self.conn.execute("SELECT user_identifier, status, outcome FROM fact_user_wave_metrics").fetchall()
+        self.assertEqual(user_metrics, [("user1@example.com", "Completed", "With failures")])
 
     def test_incremental_lookback_filtering(self):
         """Test that event logs outside of the lookback window are correctly excluded."""
@@ -300,16 +311,16 @@ class TestSQLLogicLocal(unittest.TestCase):
         old_time_usec = now_usec - int(timedelta(days=35).total_seconds() * 1_000_000)
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Old', 'Old Wave Batch', 'Old Wave Batch (ID: Wave-Old)', 'exec-old', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Old', 'Old Wave Batch', 'Old Wave Batch (ID: Wave-Old)', 'exec-old', TRUE);
             
             INSERT INTO map_wave_details VALUES 
-            ('Exchange Online Migration', 'Wave-Old', 'Old Wave Batch', 'Old Wave Batch (ID: Wave-Old)');
+            ('Exchange Online', 'Wave-Old', 'Old Wave Batch', 'Old Wave Batch (ID: Wave-Old)');
 
             INSERT INTO snapshot_item_user_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Old', 'user-old@example.com', 'msg-old', 'MIGRATED_ITEM', 'Exchange Online Email Message', 'SUCCEEDED', {old_time_usec}, 'exec-old');
+            ('Exchange Online', 'Wave-Old', 'user-old@example.com', 'msg-old', 'msg-old', 'other', 'msg-old', 'MIGRATED_ITEM', 'Exchange Online Email Message', 'SUCCEEDED', {old_time_usec}, 'exec-old');
 
             INSERT INTO snapshot_user_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Old', 'user-old@example.com', {old_time_usec}, FALSE, 'exec-old', {old_time_usec});
+            ('Exchange Online', 'Wave-Old', 'user-old@example.com', {old_time_usec}, FALSE, 'exec-old', {old_time_usec});
         """)
 
         # 2. Insert a new event TODAY (within the 2-day lookback window) indicating the old user has completed
@@ -344,7 +355,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 1. Setup mapping
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Metrics', 'Metrics Batch', 'Metrics (ID: Wave-Metrics)', 'exec-1', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Metrics', 'Metrics Batch', 'Metrics (ID: Wave-Metrics)', 'exec-1', TRUE);
         """)
 
         # 2. Insert various items:
@@ -403,7 +414,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 1. Run DML first time with early execution 'exec-early'
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-User', 'User Batch', 'User (ID: Wave-User)', 'exec-early', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-User', 'User Batch', 'User (ID: Wave-User)', 'exec-early', TRUE);
 
             INSERT INTO activity VALUES 
             ({now_usec - 10000}, 'data_migration', 'START_MIGRATION', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
@@ -425,7 +436,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 2. Run DML second time with a LATER execution 'exec-late' which completes
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-User', 'User Batch', 'User (ID: Wave-User)', 'exec-late', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-User', 'User Batch', 'User (ID: Wave-User)', 'exec-late', TRUE);
             
             UPDATE map_execution_wave SET is_latest_execution = FALSE WHERE execution_id = 'exec-early';
 
@@ -454,8 +465,8 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 1. Setup mapping
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Retry', 'Retry Wave', 'Retry (ID: Wave-Retry)', 'exec-1', FALSE),
-            ('Exchange Online Migration', 'Wave-Retry', 'Retry Wave', 'Retry (ID: Wave-Retry)', 'exec-2', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Retry', 'Retry Wave', 'Retry (ID: Wave-Retry)', 'exec-1', FALSE),
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Retry', 'Retry Wave', 'Retry (ID: Wave-Retry)', 'exec-2', TRUE);
         """)
 
         # 2. Log first: failure in exec-1 for msg-retry
@@ -500,7 +511,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Intra', 'Intra Wave', 'Intra (ID: Wave-Intra)', 'exec-1', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Intra', 'Intra Wave', 'Intra (ID: Wave-Intra)', 'exec-1', TRUE);
         """)
 
         # Insert failure event first, then success event shortly after, but within the same daily window run
@@ -530,7 +541,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Err', 'Err Wave', 'Err (ID: Wave-Err)', 'exec-1', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Err', 'Err Wave', 'Err (ID: Wave-Err)', 'exec-1', TRUE);
         """)
 
         # Insert two identical error logs (representing duplicates)
@@ -561,7 +572,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 1. Setup mapping
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Time', 'Time Wave', 'Time (ID: Wave-Time)', 'exec-1', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Time', 'Time Wave', 'Time (ID: Wave-Time)', 'exec-1', TRUE);
         """)
 
         # 2. Insert items:
@@ -604,14 +615,14 @@ class TestSQLLogicLocal(unittest.TestCase):
         # - Wave-B: in-progress (1 failed item)
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-A', 'A Batch', 'A (ID: Wave-A)', 'exec-a', TRUE),
-            ('Exchange Online Migration', 'Wave-B', 'B Batch', 'B (ID: Wave-B)', 'exec-b', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-A', 'A Batch', 'A (ID: Wave-A)', 'exec-a', TRUE),
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-B', 'B Batch', 'B (ID: Wave-B)', 'exec-b', TRUE);
             
             -- Setup old completed wave snapshot
             INSERT INTO snapshot_user_wave VALUES 
-            ('Exchange Online Migration', 'Wave-A', 'u-multi@example.com', {now_usec - 100}, TRUE, 'exec-a', {now_usec - 100});
+            ('Exchange Online', 'Wave-A', 'u-multi@example.com', {now_usec - 100}, TRUE, 'exec-a', {now_usec - 100});
             INSERT INTO snapshot_item_user_wave VALUES 
-            ('Exchange Online Migration', 'Wave-A', 'u-multi@example.com', 'item-a', 'MIGRATED_ITEM', 'Exchange Online Email Message', 'SUCCEEDED', {now_usec - 100}, 'exec-a');
+            ('Exchange Online', 'Wave-A', 'u-multi@example.com', 'item-a', 'item-a', 'other', 'item-a', 'MIGRATED_ITEM', 'Exchange Online Email Message', 'SUCCEEDED', {now_usec - 100}, 'exec-a');
 
             -- Setup new in-progress wave logs
             INSERT INTO activity VALUES 
@@ -669,7 +680,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 1. Wave mapped
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Zero', 'Zero User Batch', 'Zero (ID: Wave-Zero)', 'exec-zero', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Zero', 'Zero User Batch', 'Zero (ID: Wave-Zero)', 'exec-zero', TRUE);
         """)
 
         # 2. Insert only a setup event (makes the wave active, but user_count = 0)
@@ -690,7 +701,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(user_cnt, 0)
         self.assertEqual(comp_user, 0)
         self.assertEqual(avg_items, 0.0)
-        self.assertEqual(comp_pct, 0.0)
+        self.assertIsNone(comp_pct)
 
     def test_zero_items_user_completion(self):
         """Test that a user with zero migrated items completes successfully without division-by-zero crashes."""
@@ -702,7 +713,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Wave mapping
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-EmptyUser', 'Empty User Batch', 'EmptyUser (ID: Wave-EmptyUser)', 'exec-1', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-EmptyUser', 'Empty User Batch', 'EmptyUser (ID: Wave-EmptyUser)', 'exec-1', TRUE);
         """)
 
         # Insert ONLY START_MIGRATION and USER_MIGRATION_COMPLETE events (no item events)
@@ -740,10 +751,10 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 1. Setup user as completed in exec-1
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Rollback', 'Rollback Batch', 'Rollback (ID: Wave-Rollback)', 'exec-1', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Rollback', 'Rollback Batch', 'Rollback (ID: Wave-Rollback)', 'exec-1', TRUE);
             
             INSERT INTO snapshot_user_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Rollback', 'u1@example.com', {now_usec - 10000}, TRUE, 'exec-1', {now_usec - 10000});
+            ('Exchange Online', 'Wave-Rollback', 'u1@example.com', {now_usec - 10000}, TRUE, 'exec-1', {now_usec - 10000});
         """)
 
         # 2. Simulate a new run exec-2 starting today (active in logs, but no completion event yet)
@@ -751,7 +762,7 @@ class TestSQLLogicLocal(unittest.TestCase):
             UPDATE map_execution_wave SET is_latest_execution = FALSE WHERE execution_id = 'exec-1';
             
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Rollback', 'Rollback Batch', 'Rollback (ID: Wave-Rollback)', 'exec-2', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Rollback', 'Rollback Batch', 'Rollback (ID: Wave-Rollback)', 'exec-2', TRUE);
 
             -- Start event for exec-2
             INSERT INTO activity VALUES 
@@ -776,7 +787,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 1. Setup mapping for exec-1 (failed execution)
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Clear', 'Clear Wave', 'Clear (ID: Wave-Clear)', 'exec-1', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Clear', 'Clear Wave', 'Clear (ID: Wave-Clear)', 'exec-1', TRUE);
         """)
 
         # Insert failure event in activity for exec-1
@@ -802,7 +813,7 @@ class TestSQLLogicLocal(unittest.TestCase):
             UPDATE map_execution_wave SET is_latest_execution = FALSE WHERE execution_id = 'exec-1';
             
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Clear', 'Clear Wave', 'Clear (ID: Wave-Clear)', 'exec-2', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Clear', 'Clear Wave', 'Clear (ID: Wave-Clear)', 'exec-2', TRUE);
 
             -- Success event for u@example.com in exec-2
             INSERT INTO activity VALUES 
@@ -966,26 +977,27 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(map_wave_rows, [('Old Name',)])
 
     def test_user_failed_status_conditions(self):
-        """Test that user status is marked as Failed if total items migrated is zero and there is any failure (item or crawl)."""
+        """Test that failures are reported in outcome while status only tracks the lifecycle."""
         self.run_sql_file(self.ddl_path)
 
         now_ts = datetime.utcnow()
         now_usec = int(now_ts.timestamp() * 1_000_000)
 
         # 1. Setup execution and users:
-        # User 1 (failed item): total_items_migrated = 0, failed_items = 1, crawl_failure_items = 0 -> status 'Failed'
-        # User 2 (crawl failure): total_items_migrated = 0, failed_items = 0, crawl_failure_items = 1 -> status 'Failed'
-        # User 3 (no items/failures): total_items_migrated = 0, failed_items = 0, crawl_failure_items = 0 -> status 'Running'
-        # User 4 (completed but failed items): total_items_migrated = 0, failed_items = 1, is_completed = True -> status 'Failed'
+        # User 1 (failed item): outcome 'With failures'
+        # User 2 (crawl failure): outcome 'With failures'
+        # User 3 (no items/failures): outcome 'No items'
+        # User 4 (failed item, already completed in snapshot_user_wave): status 'Completed', outcome 'With failures'
+        # Users 1-3 are not completed and have no activity older than 24 hours, so their status stays 'Running'.
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Fail-Test', 'Fail Test Batch', 'Fail Test', 'exec-fail', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-Fail-Test', 'Fail Test Batch', 'Fail Test', 'exec-fail', TRUE);
             
             INSERT INTO snapshot_user_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Fail-Test', 'u1@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
-            ('Exchange Online Migration', 'Wave-Fail-Test', 'u2@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
-            ('Exchange Online Migration', 'Wave-Fail-Test', 'u3@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
-            ('Exchange Online Migration', 'Wave-Fail-Test', 'u4@example.com', {now_usec}, TRUE, 'exec-fail', {now_usec});
+            ('Exchange Online', 'Wave-Fail-Test', 'u1@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
+            ('Exchange Online', 'Wave-Fail-Test', 'u2@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
+            ('Exchange Online', 'Wave-Fail-Test', 'u3@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
+            ('Exchange Online', 'Wave-Fail-Test', 'u4@example.com', {now_usec}, TRUE, 'exec-fail', {now_usec});
             
             -- User 1 item failure event
             INSERT INTO activity VALUES 
@@ -1009,26 +1021,20 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
 
         # Verify fact_user_wave_metrics
-        u1_status = self.conn.execute("SELECT status FROM fact_user_wave_metrics WHERE user_identifier='u1@example.com'").fetchone()[0]
-        u2_status = self.conn.execute("SELECT status FROM fact_user_wave_metrics WHERE user_identifier='u2@example.com'").fetchone()[0]
-        u3_status = self.conn.execute("SELECT status FROM fact_user_wave_metrics WHERE user_identifier='u3@example.com'").fetchone()[0]
-        u4_status = self.conn.execute("SELECT status FROM fact_user_wave_metrics WHERE user_identifier='u4@example.com'").fetchone()[0]
-
-        self.assertEqual(u1_status, "Failed")
-        self.assertEqual(u2_status, "Failed")
-        self.assertEqual(u3_status, "Running")
-        self.assertEqual(u4_status, "Failed")
+        wave_rows = dict((r[0], (r[1], r[2])) for r in self.conn.execute(
+            "SELECT user_identifier, status, outcome FROM fact_user_wave_metrics WHERE batch_id='Wave-Fail-Test'").fetchall())
+        self.assertEqual(wave_rows["u1@example.com"], ("Running", "With failures"))
+        self.assertEqual(wave_rows["u2@example.com"], ("Running", "With failures"))
+        self.assertEqual(wave_rows["u3@example.com"], ("Running", "No items"))
+        self.assertEqual(wave_rows["u4@example.com"], ("Completed", "With failures"))
 
         # Verify fact_user_overall_metrics
-        u1_overall = self.conn.execute("SELECT status FROM fact_user_overall_metrics WHERE user_identifier='u1@example.com'").fetchone()[0]
-        u2_overall = self.conn.execute("SELECT status FROM fact_user_overall_metrics WHERE user_identifier='u2@example.com'").fetchone()[0]
-        u3_overall = self.conn.execute("SELECT status FROM fact_user_overall_metrics WHERE user_identifier='u3@example.com'").fetchone()[0]
-        u4_overall = self.conn.execute("SELECT status FROM fact_user_overall_metrics WHERE user_identifier='u4@example.com'").fetchone()[0]
-
-        self.assertEqual(u1_overall, "Failed")
-        self.assertEqual(u2_overall, "Failed")
-        self.assertEqual(u3_overall, "Running")
-        self.assertEqual(u4_overall, "Failed")
+        overall_rows = dict((r[0], (r[1], r[2])) for r in self.conn.execute(
+            "SELECT user_identifier, status, outcome FROM fact_user_overall_metrics").fetchall())
+        self.assertEqual(overall_rows["u1@example.com"], ("Running", "With failures"))
+        self.assertEqual(overall_rows["u2@example.com"], ("Running", "With failures"))
+        self.assertEqual(overall_rows["u3@example.com"], ("Running", "No items"))
+        self.assertEqual(overall_rows["u4@example.com"], ("Completed", "With failures"))
 
     def test_top_errors_aggregation(self):
         """Test that fact_top_errors properly aggregates, unique-ifies, and ranks errors."""
@@ -1040,7 +1046,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Setup mapping
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-1', 'Wave 1', 'Wave 1 Filter', 'exec-1', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-1', 'Wave 1', 'Wave 1 Filter', 'exec-1', TRUE);
         """)
 
         # Insert events in activity
@@ -1110,7 +1116,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 1. Setup execution exec-1 (initial run with failures for u1 and u2)
         self.conn.execute(f"""
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-A', 'Wave A', 'Wave A Filter', 'exec-1', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-A', 'Wave A', 'Wave A Filter', 'exec-1', TRUE);
         """)
 
         self.conn.execute(f"""
@@ -1138,7 +1144,7 @@ class TestSQLLogicLocal(unittest.TestCase):
             UPDATE map_execution_wave SET is_latest_execution = FALSE WHERE execution_id = 'exec-1';
             
             INSERT INTO map_execution_wave VALUES 
-            ('Exchange Online Migration', 'Wave-A', 'Wave A', 'Wave A Filter', 'exec-2', TRUE);
+            ('Exchange Online', 'Exchange Online Migration', 'Wave-A', 'Wave A', 'Wave A Filter', 'exec-2', TRUE);
 
             -- u1 fails with 500 error in exec-2
             INSERT INTO activity VALUES 

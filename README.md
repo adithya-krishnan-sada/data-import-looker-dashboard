@@ -74,7 +74,8 @@ Before beginning the deployment, ensure your environment meets the following pre
 2. Enter the configuration inputs when prompted:
    - `Project ID`
    - `Data Location` (defaults to `US`)
-   - `DMS Dataset Name` (defaults to `GWS_Audit`)
+   - `Source Dataset Name` – dataset with the Workspace audit log export (defaults to `GWS_Audit`)
+   - `Target Dataset Name` – dataset for the reporting tables; created if missing (defaults to the source dataset)
    - `Refresh Schedule` (defaults to `every day 02:00`)
 
 ### Step 3: Connect and Save Your Dashboard

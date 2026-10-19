@@ -90,8 +90,12 @@ read -p "Location (Press Enter for default 'US'): " BQ_LOC_INPUT
 BQ_LOCATION=${BQ_LOC_INPUT:-US}
 echo ""
 
-read -p "Enter DMS Dataset Name (Press Enter for default 'GWS_Audit'): " DMS_INPUT
-DMS_DATASET=${DMS_INPUT:-GWS_Audit}
+read -p "Enter Source Dataset Name containing the audit log export (Press Enter for default 'GWS_Audit'): " SOURCE_INPUT
+SOURCE_DATASET=${SOURCE_INPUT:-GWS_Audit}
+echo ""
+
+read -p "Enter Target Dataset Name for the reporting tables (Press Enter to use '$SOURCE_DATASET'): " TARGET_INPUT
+TARGET_DATASET=${TARGET_INPUT:-$SOURCE_DATASET}
 echo ""
 
 echo "Select how often the dashboard should refresh."
@@ -123,23 +127,35 @@ if [[ ! -f "ddl.sql" ]] || [[ ! -f "dml.sql" ]]; then
     handle_failure "'ddl.sql' or 'dml.sql' not found. Please ensure they are in the same folder." && continue
 fi
 
+# Create the target dataset if it does not exist yet
+if ! bq show --project_id="$PROJECT_ID" "${PROJECT_ID}:${TARGET_DATASET}" &> /dev/null < /dev/null; then
+    echo "📁 Target dataset '$TARGET_DATASET' not found. Creating it in $BQ_LOCATION..."
+    if ! bq mk --dataset --location="$BQ_LOCATION" --project_id="$PROJECT_ID" "${PROJECT_ID}:${TARGET_DATASET}"; then
+        handle_failure "Failed to create target dataset '$TARGET_DATASET'." && continue
+    fi
+    echo ""
+fi
+
 echo "🚀 Processing DDL and DML SQL..."
 echo ""
 
 # Process DDL
 DDL_QUERY=$(sed -e "s/{project}/${PROJECT_ID}/g" \
-                 -e "s/{dataset}/${DMS_DATASET}/g" \
+                 -e "s/{source_dataset}/${SOURCE_DATASET}/g" \
+                 -e "s/{target_dataset}/${TARGET_DATASET}/g" \
                  ddl.sql)
 
 # Process DML Backfill (uses 365 days)
 DML_BACKFILL_QUERY=$(sed -e "s/{project}/${PROJECT_ID}/g" \
-                 -e "s/{dataset}/${DMS_DATASET}/g" \
+                 -e "s/{source_dataset}/${SOURCE_DATASET}/g" \
+                 -e "s/{target_dataset}/${TARGET_DATASET}/g" \
                  -e "s/{lookback_days}/365/g" \
                  dml.sql)
 
 # Process DML Scheduled (uses 2 days)
 DML_SCHEDULED_QUERY=$(sed -e "s/{project}/${PROJECT_ID}/g" \
-                 -e "s/{dataset}/${DMS_DATASET}/g" \
+                 -e "s/{source_dataset}/${SOURCE_DATASET}/g" \
+                 -e "s/{target_dataset}/${TARGET_DATASET}/g" \
                  -e "s/{lookback_days}/2/g" \
                  dml.sql)
 
@@ -211,9 +227,17 @@ echo ""
 # ----------------------------------------------------------
 # 6. Generate Magic Link
 # ----------------------------------------------------------
-MASTER_REPORT_ID="3610231e-b36b-4890-83d5-f90c3dbe776d"
+MASTER_REPORT_ID="af17bd5f-8a4b-48ea-a56a-8b264de9ba9b"
 
-MAGIC_LINK="https://lookerstudio.google.com/reporting/create?c.reportId=$MASTER_REPORT_ID&ds.ds0.connector=bigQuery&ds.ds0.type=TABLE&ds.ds0.projectId=$PROJECT_ID&ds.ds0.datasetId=$DMS_DATASET&ds.ds0.tableId=map_wave_details&ds.ds1.connector=bigQuery&ds.ds1.type=TABLE&ds.ds1.projectId=$PROJECT_ID&ds.ds1.datasetId=$DMS_DATASET&ds.ds1.tableId=fact_datatype_metrics&ds.ds2.connector=bigQuery&ds.ds2.type=TABLE&ds.ds2.projectId=$PROJECT_ID&ds.ds2.datasetId=$DMS_DATASET&ds.ds2.tableId=fact_wave_metrics&ds.ds3.connector=bigQuery&ds.ds3.type=TABLE&ds.ds3.projectId=$PROJECT_ID&ds.ds3.datasetId=$DMS_DATASET&ds.ds3.tableId=fact_user_wave_metrics&ds.ds4.connector=bigQuery&ds.ds4.type=TABLE&ds.ds4.projectId=$PROJECT_ID&ds.ds4.datasetId=$DMS_DATASET&ds.ds4.tableId=fact_migration_timeline&ds.ds5.connector=bigQuery&ds.ds5.type=TABLE&ds.ds5.projectId=$PROJECT_ID&ds.ds5.datasetId=$DMS_DATASET&ds.ds5.tableId=fact_user_overall_metrics&ds.ds6.connector=bigQuery&ds.ds6.type=TABLE&ds.ds6.projectId=$PROJECT_ID&ds.ds6.datasetId=$DMS_DATASET&ds.ds6.tableId=fact_migration_errors&ds.ds7.connector=bigQuery&ds.ds7.type=TABLE&ds.ds7.projectId=$PROJECT_ID&ds.ds7.datasetId=$DMS_DATASET&ds.ds7.tableId=fact_top_errors"
+# Template data source alias -> BigQuery table in the target dataset
+DATA_SOURCES="ds0:map_wave_details ds1:fact_datatype_metrics ds2:fact_wave_metrics ds3:fact_user_wave_metrics ds4:fact_migration_timeline ds5:fact_user_overall_metrics ds6:fact_migration_errors ds7:fact_top_errors ds51:fact_failed_items"
+
+MAGIC_LINK="https://lookerstudio.google.com/reporting/create?c.reportId=$MASTER_REPORT_ID&r.reportName=Data%20Import%20Dashboard"
+for ds in $DATA_SOURCES; do
+    alias=${ds%%:*}
+    table=${ds#*:}
+    MAGIC_LINK+="&ds.$alias.connector=bigQuery&ds.$alias.type=TABLE&ds.$alias.projectId=$PROJECT_ID&ds.$alias.datasetId=$TARGET_DATASET&ds.$alias.tableId=$table&ds.$alias.keepDatasourceName=true"
+done
 echo "=========================================================="
 echo "✅ DEPLOYMENT COMPLETE"
 echo "=========================================================="

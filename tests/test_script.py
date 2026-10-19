@@ -39,6 +39,9 @@ if log_file:
     with open(log_file, "a") as f:
         f.write(json.dumps({"cmd": "bq", "args": args, "stdin": stdin_content}) + "\\n")
 
+if "show" in args:
+    sys.exit(1 if os.environ.get("MOCK_BQ_SHOW_FAIL") == "1" else 0)
+
 # Keep track of retry attempts in a file
 attempt_file = os.path.join(os.path.dirname(log_file), "bq_attempt.txt")
 attempt = 1
@@ -240,7 +243,7 @@ class TestDeploymentScript(unittest.TestCase):
     def test_happy_path(self):
         self.setup_standard_mocks()
         
-        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\nDashboard_Data\nevery day 02:00\n"
         returncode, stdout, stderr = self.run_script(inputs)
         
         self.assertEqual(returncode, 0, f"Script failed with stderr:\n{stderr}")
@@ -255,11 +258,11 @@ class TestDeploymentScript(unittest.TestCase):
         self.assertEqual(len(gcloud_calls), 2)
         
         # bq calls (DDL, DML, LS, MK)
-        bq_calls = [c for c in calls if c["cmd"] == "bq"]
+        bq_calls = [c for c in calls if c["cmd"] == "bq" and "show" not in c["args"]]
         self.assertEqual(len(bq_calls), 4)
         
         # Check DDL content
-        self.assertIn("CREATE TABLE IF NOT EXISTS `my-test-project.GWS_Audit.map_execution_wave`", bq_calls[0]["stdin"])
+        self.assertIn("CREATE TABLE IF NOT EXISTS `my-test-project.Dashboard_Data.map_execution_wave`", bq_calls[0]["stdin"])
         
         # Check DML Backfill content (lookback_days=365)
         self.assertIn("INTERVAL 365 DAY", bq_calls[1]["stdin"])
@@ -271,11 +274,27 @@ class TestDeploymentScript(unittest.TestCase):
         
         # Check লুকer link replacement
         self.assertIn("projectId=my-test-project", stdout)
-        self.assertIn("datasetId=GWS_Audit", stdout)
+        self.assertIn("datasetId=Dashboard_Data", stdout)
+        self.assertNotIn("datasetId=GWS_Audit", stdout)
+        self.assertIn("c.reportId=af17bd5f-8a4b-48ea-a56a-8b264de9ba9b", stdout)
+        self.assertIn("ds.ds51.tableId=fact_failed_items", stdout)
+
+    def test_target_dataset_created_when_missing(self):
+        self.setup_standard_mocks()
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\nDashboard_Data\nevery day 02:00\n"
+        returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_BQ_SHOW_FAIL": "1"})
+
+        self.assertEqual(returncode, 0, f"Script failed with stderr:\n{stderr}")
+        self.assertIn("Target dataset 'Dashboard_Data' not found", stdout)
+
+        calls = self.get_mock_calls()
+        dataset_mk = [c for c in calls if c["cmd"] == "bq" and "--dataset" in c["args"]]
+        self.assertEqual(len(dataset_mk), 1)
+        self.assertIn("my-test-project:Dashboard_Data", dataset_mk[0]["args"])
 
     def test_empty_project_id_validation(self):
         self.setup_standard_mocks()
-        inputs = "Y\n\n\nmy-test-project\n\n\n\n"
+        inputs = "Y\n\n\nmy-test-project\n\n\n\n\n"
         returncode, stdout, stderr = self.run_script(inputs)
         
         self.assertEqual(returncode, 0)
@@ -286,7 +305,7 @@ class TestDeploymentScript(unittest.TestCase):
         self.setup_standard_mocks()
         os.remove(self.ddl_path)
         
-        inputs = "Y\nmy-test-project\n\n\n\ne\n"
+        inputs = "Y\nmy-test-project\n\n\n\n\ne\n"
         returncode, stdout, stderr = self.run_script(inputs)
         
         self.assertEqual(returncode, 1)
@@ -296,20 +315,20 @@ class TestDeploymentScript(unittest.TestCase):
     def test_jq_missing(self):
         self.setup_standard_mocks(include_jq=False)
         
-        inputs = "Y\nmy-test-project\n\n\n\n"
+        inputs = "Y\nmy-test-project\n\n\n\n\n"
         returncode, stdout, stderr = self.run_script(inputs)
         
         self.assertEqual(returncode, 0)
         self.assertIn("'jq' is not installed. Skipping scheduled query creation", stdout)
         
         calls = self.get_mock_calls()
-        bq_calls = [c for c in calls if c["cmd"] == "bq"]
+        bq_calls = [c for c in calls if c["cmd"] == "bq" and "show" not in c["args"]]
         self.assertEqual(len(bq_calls), 2)  # DDL, DML backfill only
 
     def test_ddl_failure_exit(self):
         self.setup_standard_mocks()
         
-        inputs = "Y\nmy-test-project\n\n\n\ne\n"
+        inputs = "Y\nmy-test-project\n\n\n\n\ne\n"
         returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_BQ_DDL_FAIL": "1"})
         
         self.assertEqual(returncode, 1)
@@ -319,7 +338,7 @@ class TestDeploymentScript(unittest.TestCase):
     def test_dml_failure_exit(self):
         self.setup_standard_mocks()
         
-        inputs = "Y\nmy-test-project\n\n\n\ne\n"
+        inputs = "Y\nmy-test-project\n\n\n\n\ne\n"
         returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_BQ_DML_FAIL": "1"})
         
         self.assertEqual(returncode, 1)
@@ -329,7 +348,7 @@ class TestDeploymentScript(unittest.TestCase):
     def test_schedule_creation_failure_exit(self):
         self.setup_standard_mocks()
         
-        inputs = "Y\nmy-test-project\n\n\n\ne\n"
+        inputs = "Y\nmy-test-project\n\n\n\n\ne\n"
         returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_BQ_MK_FAIL": "1"})
         
         self.assertEqual(returncode, 1)
@@ -339,14 +358,14 @@ class TestDeploymentScript(unittest.TestCase):
         self.setup_standard_mocks()
         
         # User answers 'r' to retry, and next attempt succeeds because we only fail the first run
-        inputs = "Y\nmy-test-project\n\n\n\nr\n"
+        inputs = "Y\nmy-test-project\n\n\n\n\nr\n"
         returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_BQ_DDL_FAIL": "1"})
         
         self.assertEqual(returncode, 0)
         self.assertIn("Restarting deployment...", stdout)
         
         calls = self.get_mock_calls()
-        bq_calls = [c for c in calls if c["cmd"] == "bq"]
+        bq_calls = [c for c in calls if c["cmd"] == "bq" and "show" not in c["args"]]
         
         # Should have 5 calls: DDL (fail), DDL (success), DML, LS, MK
         self.assertEqual(len(bq_calls), 5)
@@ -363,7 +382,7 @@ class TestDeploymentScript(unittest.TestCase):
             }
         ]
         
-        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\n\nevery day 02:00\n"
         returncode, stdout, stderr = self.run_script(
             inputs, 
             extra_env={"MOCK_BQ_LS_OUTPUT": json.dumps(existing_configs)}
@@ -374,7 +393,7 @@ class TestDeploymentScript(unittest.TestCase):
         self.assertIn("✅ Existing scheduled query deleted: projects/my-proj/locations/US/transferConfigs/cfg-111", stdout)
         
         calls = self.get_mock_calls()
-        bq_calls = [c for c in calls if c["cmd"] == "bq"]
+        bq_calls = [c for c in calls if c["cmd"] == "bq" and "show" not in c["args"]]
         rm_calls = [c for c in bq_calls if "rm" in c["args"]]
         self.assertEqual(len(rm_calls), 1)
         self.assertIn("projects/my-proj/locations/US/transferConfigs/cfg-111", rm_calls[0]["args"])
@@ -389,7 +408,7 @@ class TestDeploymentScript(unittest.TestCase):
             }
         ]
         
-        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\n\nevery day 02:00\n"
         returncode, stdout, stderr = self.run_script(
             inputs, 
             extra_env={
@@ -402,7 +421,7 @@ class TestDeploymentScript(unittest.TestCase):
         self.assertIn("Warning: Failed to delete existing scheduled query: projects/my-proj/locations/US/transferConfigs/cfg-111. Attempting to proceed...", stdout)
         
         calls = self.get_mock_calls()
-        bq_calls = [c for c in calls if c["cmd"] == "bq"]
+        bq_calls = [c for c in calls if c["cmd"] == "bq" and "show" not in c["args"]]
         
         # mk should still be called even though rm failed
         mk_calls = [c for c in bq_calls if "mk" in c["args"]]
@@ -422,7 +441,7 @@ class TestDeploymentScript(unittest.TestCase):
             }
         ]
         
-        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\n\nevery day 02:00\n"
         returncode, stdout, stderr = self.run_script(
             inputs, 
             extra_env={"MOCK_BQ_LS_OUTPUT": json.dumps(existing_configs)}
@@ -433,7 +452,7 @@ class TestDeploymentScript(unittest.TestCase):
         self.assertIn("projects/my-proj/locations/US/transferConfigs/cfg-222", stdout)
         
         calls = self.get_mock_calls()
-        bq_calls = [c for c in calls if c["cmd"] == "bq"]
+        bq_calls = [c for c in calls if c["cmd"] == "bq" and "show" not in c["args"]]
         rm_calls = [c for c in bq_calls if "rm" in c["args"]]
         self.assertEqual(len(rm_calls), 2)
         
@@ -452,7 +471,7 @@ class TestDeploymentScript(unittest.TestCase):
 
     def test_disclaimer_invalid_then_accept(self):
         self.setup_standard_mocks()
-        inputs = "invalid\nY\nmy-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
+        inputs = "invalid\nY\nmy-test-project\nUS\nGWS_Audit\n\nevery day 02:00\n"
         returncode, stdout, stderr = self.run_script(inputs)
         
         self.assertEqual(returncode, 0)
