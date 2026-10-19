@@ -272,7 +272,7 @@ class TestDeploymentScript(unittest.TestCase):
         self.assertIn("mk", bq_calls[3]["args"])
         self.assertIn("--schedule=every day 02:00", bq_calls[3]["args"])
         
-        # Check লুকer link replacement
+        # Check Looker link replacement
         self.assertIn("projectId=my-test-project", stdout)
         self.assertIn("datasetId=Dashboard_Data", stdout)
         self.assertNotIn("datasetId=GWS_Audit", stdout)
