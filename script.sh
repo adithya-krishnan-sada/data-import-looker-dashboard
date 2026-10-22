@@ -14,6 +14,18 @@
 
 #!/bin/bash
 
+# Enable an API only if it is not already enabled (enabling requires a higher permission than listing)
+enable_api() {
+    local api="$1"
+    local enabled
+    enabled=$(gcloud services list --enabled --project "$PROJECT_ID" --filter="config.name=$api" --format="value(config.name)" 2>/dev/null)
+    if [[ "$enabled" == "$api" ]]; then
+        echo "$api is already enabled."
+        return 0
+    fi
+    gcloud services enable "$api" --project "$PROJECT_ID"
+}
+
 # Function to handle failures
 handle_failure() {
     local error_msg="$1"
@@ -21,7 +33,11 @@ handle_failure() {
     echo "❌ Error: $error_msg"
     echo ""
     while true; do
-        read -p "Do you want to (r)etry from the start or (e)xit? [r/e]: " choice
+        if ! read -p "Do you want to (r)etry from the start or (e)xit? [r/e]: " choice; then
+            echo ""
+            echo "👋 No input available. Exiting."
+            exit 1
+        fi
         case "$choice" in
             [Rr]* ) 
                 echo "🔄 Restarting deployment..."
@@ -112,10 +128,10 @@ START_TIME=$(date +%s)
 # 2. Enable Required APIs
 # ----------------------------------------------------------
 echo "⚡ Enabling required Google Cloud APIs..."
-if ! gcloud services enable bigqueryreservation.googleapis.com --project "$PROJECT_ID"; then
+if ! enable_api bigqueryreservation.googleapis.com; then
     handle_failure "Failed to enable bigqueryreservation.googleapis.com API. Please check your permissions." && continue
 fi
-if ! gcloud services enable bigquerydatatransfer.googleapis.com --project "$PROJECT_ID"; then
+if ! enable_api bigquerydatatransfer.googleapis.com; then
     handle_failure "Failed to enable bigquerydatatransfer.googleapis.com API. Please check your permissions." && continue
 fi
 echo ""

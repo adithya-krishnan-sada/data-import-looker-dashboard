@@ -18,6 +18,12 @@ if log_file:
 
 if os.environ.get("MOCK_GCLOUD_FAIL") == "1":
     sys.exit(1)
+
+# `services list --enabled --filter=config.name=<api>` prints the API when it is already enabled
+if "list" in args and os.environ.get("MOCK_GCLOUD_APIS_ENABLED") == "1":
+    for arg in args:
+        if arg.startswith("--filter=config.name="):
+            print(arg.split("=", 2)[2])
 sys.exit(0)
 """
 
@@ -254,8 +260,8 @@ class TestDeploymentScript(unittest.TestCase):
         calls = self.get_mock_calls()
         
         # gcloud
-        gcloud_calls = [c for c in calls if c["cmd"] == "gcloud"]
-        self.assertEqual(len(gcloud_calls), 2)
+        enable_calls = [c for c in calls if c["cmd"] == "gcloud" and "enable" in c["args"]]
+        self.assertEqual(len(enable_calls), 2)
         
         # bq calls (DDL, DML, LS, MK)
         bq_calls = [c for c in calls if c["cmd"] == "bq" and "show" not in c["args"]]
@@ -278,6 +284,19 @@ class TestDeploymentScript(unittest.TestCase):
         self.assertNotIn("datasetId=GWS_Audit", stdout)
         self.assertIn("c.reportId=af17bd5f-8a4b-48ea-a56a-8b264de9ba9b", stdout)
         self.assertIn("ds.ds51.tableId=fact_failed_items", stdout)
+
+    def test_already_enabled_apis_are_not_enabled_again(self):
+        self.setup_standard_mocks()
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\n\nevery day 02:00\n"
+        returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_GCLOUD_APIS_ENABLED": "1"})
+
+        self.assertEqual(returncode, 0, f"Script failed with stderr:\n{stderr}")
+        self.assertIn("bigqueryreservation.googleapis.com is already enabled.", stdout)
+        self.assertIn("bigquerydatatransfer.googleapis.com is already enabled.", stdout)
+
+        calls = self.get_mock_calls()
+        enable_calls = [c for c in calls if c["cmd"] == "gcloud" and "enable" in c["args"]]
+        self.assertEqual(len(enable_calls), 0)
 
     def test_target_dataset_created_when_missing(self):
         self.setup_standard_mocks()
@@ -344,6 +363,17 @@ class TestDeploymentScript(unittest.TestCase):
         self.assertEqual(returncode, 1)
         self.assertIn("Error: DML execution failed.", stdout)
         self.assertIn("👋 Exiting.", stdout)
+
+    def test_failure_without_input_exits(self):
+        self.setup_standard_mocks()
+
+        # No answer to the retry prompt: the script must exit instead of asking forever
+        inputs = "Y\nmy-test-project\n\n\n\n\n"
+        returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_BQ_MK_FAIL": "1"})
+
+        self.assertEqual(returncode, 1)
+        self.assertIn("Error: Failed to create scheduled query.", stdout)
+        self.assertIn("No input available. Exiting.", stdout)
 
     def test_schedule_creation_failure_exit(self):
         self.setup_standard_mocks()
