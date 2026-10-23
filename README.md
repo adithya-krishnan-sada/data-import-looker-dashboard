@@ -77,6 +77,7 @@ Before beginning the deployment, ensure your environment meets the following pre
    - `Source Dataset Name` – dataset with the Workspace audit log export (defaults to `GWS_Audit`)
    - `Target Dataset Name` – dataset for the reporting tables; created if missing (defaults to the source dataset)
    - `Refresh Schedule` (defaults to `every day 02:00`)
+   - `Scheduled Query Name` – an existing scheduled query with this name is replaced (defaults to `Data Import Dashboard Refresh`)
 
 ### Step 3: Connect and Save Your Dashboard
 1. Copy the generated **Magic Link** output at the end of the script and paste it into your browser.

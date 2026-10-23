@@ -118,7 +118,11 @@ echo "Select how often the dashboard should refresh."
 echo "Examples: 'every 1 hours', 'every 6 hours', 'every day 02:00'"
 read -p "Enter Schedule (Press Enter for default 'every day 02:00'): " SCHEDULE_INPUT
 SCHEDULE=${SCHEDULE_INPUT:-"every day 02:00"}
-DISPLAY_NAME="Data Import Dashboard Refresh"
+echo ""
+
+echo "An existing scheduled query with the same name is replaced."
+read -p "Enter Scheduled Query Name (Press Enter for default 'Data Import Dashboard Refresh'): " DISPLAY_NAME_INPUT
+DISPLAY_NAME=${DISPLAY_NAME_INPUT:-"Data Import Dashboard Refresh"}
 echo ""
 
 while true; do
