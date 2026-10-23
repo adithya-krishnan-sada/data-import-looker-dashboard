@@ -19,6 +19,9 @@ if log_file:
 if os.environ.get("MOCK_GCLOUD_FAIL") == "1":
     sys.exit(1)
 
+if "enable" in args and os.environ.get("MOCK_GCLOUD_ENABLE_FAIL") == "1":
+    sys.exit(1)
+
 # `services list --enabled --filter=config.name=<api>` prints the API when it is already enabled
 if "list" in args and os.environ.get("MOCK_GCLOUD_APIS_ENABLED") == "1":
     for arg in args:
@@ -284,6 +287,32 @@ class TestDeploymentScript(unittest.TestCase):
         self.assertNotIn("datasetId=GWS_Audit", stdout)
         self.assertIn("c.reportId=af17bd5f-8a4b-48ea-a56a-8b264de9ba9b", stdout)
         self.assertIn("ds.ds51.tableId=fact_failed_items", stdout)
+
+    def test_api_list_without_permission_exits(self):
+        self.setup_standard_mocks()
+
+        # gcloud cannot list services (no Service Usage permission)
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\n\nevery day 02:00\n\ne\n"
+        returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_GCLOUD_FAIL": "1"})
+
+        self.assertEqual(returncode, 1)
+        self.assertIn("Could not check whether bigqueryreservation.googleapis.com is enabled.", stdout)
+        self.assertIn("Error: Required API bigqueryreservation.googleapis.com is not available.", stdout)
+
+        calls = self.get_mock_calls()
+        bq_calls = [c for c in calls if c["cmd"] == "bq"]
+        self.assertEqual(len(bq_calls), 0)
+
+    def test_disabled_api_without_enable_permission_exits(self):
+        self.setup_standard_mocks()
+
+        # Listing works but shows the API as disabled, and enabling is not allowed
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\n\nevery day 02:00\n\ne\n"
+        returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_GCLOUD_ENABLE_FAIL": "1"})
+
+        self.assertEqual(returncode, 1)
+        self.assertIn("bigqueryreservation.googleapis.com is not enabled and your account cannot enable it.", stdout)
+        self.assertIn("👋 Exiting.", stdout)
 
     def test_already_enabled_apis_are_not_enabled_again(self):
         self.setup_standard_mocks()

@@ -14,16 +14,25 @@
 
 #!/bin/bash
 
-# Enable an API only if it is not already enabled (enabling requires a higher permission than listing)
+# Enable an API only if it is not already enabled (enabling needs a higher permission than listing)
 enable_api() {
     local api="$1"
     local enabled
-    enabled=$(gcloud services list --enabled --project "$PROJECT_ID" --filter="config.name=$api" --format="value(config.name)" 2>/dev/null)
+    if ! enabled=$(gcloud services list --enabled --project "$PROJECT_ID" --filter="config.name=$api" --format="value(config.name)" 2>/dev/null); then
+        echo "Could not check whether $api is enabled."
+        echo "Your account needs permission to list APIs (for example the Viewer or Service Usage Viewer role)."
+        return 1
+    fi
     if [[ "$enabled" == "$api" ]]; then
         echo "$api is already enabled."
         return 0
     fi
-    gcloud services enable "$api" --project "$PROJECT_ID"
+    if gcloud services enable "$api" --project "$PROJECT_ID"; then
+        echo "$api enabled."
+        return 0
+    fi
+    echo "$api is not enabled and your account cannot enable it. Ask a project Owner to enable it."
+    return 1
 }
 
 # Function to handle failures
@@ -133,10 +142,10 @@ START_TIME=$(date +%s)
 # ----------------------------------------------------------
 echo "⚡ Enabling required Google Cloud APIs..."
 if ! enable_api bigqueryreservation.googleapis.com; then
-    handle_failure "Failed to enable bigqueryreservation.googleapis.com API. Please check your permissions." && continue
+    handle_failure "Required API bigqueryreservation.googleapis.com is not available." && continue
 fi
 if ! enable_api bigquerydatatransfer.googleapis.com; then
-    handle_failure "Failed to enable bigquerydatatransfer.googleapis.com API. Please check your permissions." && continue
+    handle_failure "Required API bigquerydatatransfer.googleapis.com is not available." && continue
 fi
 echo ""
 
@@ -203,7 +212,7 @@ else
     # Delete existing scheduled query with same name if it exists
     echo "🔍 Checking for existing scheduled query with name '$DISPLAY_NAME'..."
     if ! EXISTING_CONFIGS=$(bq --format=json ls --transfer_config --transfer_location="$BQ_LOCATION" --filter="dataSourceIds:scheduled_query" --project_id="$PROJECT_ID"); then
-        handle_failure "Failed to check existing scheduled queries. Please verify your permissions." && continue
+        handle_failure "Failed to check existing scheduled queries. Check that the BigQuery Data Transfer API (bigquerydatatransfer.googleapis.com) is enabled and that you have the BigQuery User role." && continue
     fi
     
     if [[ -n "$EXISTING_CONFIGS" ]]; then
@@ -239,7 +248,7 @@ else
       --force; then
         echo "✅ Schedule created successfully!"
     else
-        handle_failure "Failed to create scheduled query." && continue
+        handle_failure "Failed to create scheduled query. Check that the BigQuery Data Transfer API (bigquerydatatransfer.googleapis.com) is enabled, that you have the BigQuery User role, and that the browser authorization step was completed." && continue
     fi
 fi
 echo ""
